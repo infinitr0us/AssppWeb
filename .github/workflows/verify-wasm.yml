@@ -1,0 +1,76 @@
+name: Verify unicorn.wasm rebuild
+
+# Rebuilds the SAP signer engine with the PR's own build script
+# (frontend/scripts/unicorn-wasm-patch/build.sh: unicorn 2.1.4 + the TCI
+# patch, compiled in emscripten/emsdk:3.1.61) and checks that the output
+# matches the prebuilt unicorn.wasm / unicorn.mjs committed in #89.
+
+on:
+  push:
+    branches: [verify-wasm]
+  workflow_dispatch:
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VENDOR: frontend/src/apple/sap/vendor
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Keep the committed files
+        run: |
+          mkdir -p cmp/committed cmp/rebuilt
+          cp "$VENDOR/unicorn.wasm" "$VENDOR/unicorn.mjs" cmp/committed/
+
+      - name: Rebuild with build.sh (unmodified)
+        working-directory: frontend/scripts/unicorn-wasm-patch
+        run: bash build.sh
+
+      - name: Record build inputs
+        run: |
+          echo "unicorn-src HEAD: $(git -C frontend/scripts/unicorn-wasm-patch/unicorn-src rev-parse HEAD)"
+          echo "patch sha256: $(sha256sum frontend/scripts/unicorn-wasm-patch/patches/unicorn-2.1.4-tci-wasm.patch | cut -d' ' -f1)"
+          echo "glue.c sha256: $(sha256sum frontend/scripts/unicorn-wasm-patch/glue.c | cut -d' ' -f1)"
+          echo "emsdk image: $(docker image inspect emscripten/emsdk:3.1.61 --format '{{index .RepoDigests 0}}')"
+
+      - name: Compare
+        run: |
+          cp "$VENDOR/unicorn.wasm" "$VENDOR/unicorn.mjs" cmp/rebuilt/
+          (cd cmp/committed && sha256sum unicorn.wasm unicorn.mjs) > cmp/committed.sha256
+          (cd cmp/rebuilt && sha256sum unicorn.wasm unicorn.mjs) > cmp/rebuilt.sha256
+          echo "--- committed"; cat cmp/committed.sha256
+          echo "--- rebuilt";   cat cmp/rebuilt.sha256
+          ls -l cmp/committed cmp/rebuilt
+          if diff cmp/committed.sha256 cmp/rebuilt.sha256; then
+            echo "RESULT: BYTE-IDENTICAL" | tee cmp/result.txt
+          else
+            echo "RESULT: DIFFERENT" | tee cmp/result.txt
+          fi
+
+      - name: Structural diff (only if different)
+        if: always()
+        run: |
+          [ -f cmp/result.txt ] || exit 0
+          grep -q BYTE-IDENTICAL cmp/result.txt && exit 0
+          sudo apt-get install -y -qq wabt >/dev/null
+          for v in committed rebuilt; do
+            wasm-objdump -h cmp/$v/unicorn.wasm > cmp/$v.sections.txt
+            wasm-objdump -x -j Import cmp/$v/unicorn.wasm > cmp/$v.imports.txt
+            wasm2wat --no-check cmp/$v/unicorn.wasm -o cmp/$v.wat
+          done
+          diff cmp/committed.sections.txt cmp/rebuilt.sections.txt || true
+          diff cmp/committed.imports.txt cmp/rebuilt.imports.txt || true
+          diff cmp/committed.wat cmp/rebuilt.wat > cmp/wat.diff || true
+          echo "wat diff lines: $(wc -l < cmp/wat.diff)"
+          head -200 cmp/wat.diff
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-compare
+          path: cmp/
