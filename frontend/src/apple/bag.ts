@@ -4,6 +4,8 @@ import type { SapEndpoints } from "./sap/types";
 
 export interface BagOutput {
   authURL: string;
+  redownloadURL?: string;
+  updateURL?: string;
   /** Present when the bag advertises the SAP signing protocol. */
   sapEndpoints?: SapEndpoints;
 }
@@ -60,6 +62,11 @@ export async function fetchBag(deviceId: string): Promise<BagOutput> {
       (dict.authenticateAccount as string | undefined) ??
       (urlBag?.authenticateAccount as string | undefined);
 
+    const downloadURLs = {
+      redownloadURL: (dict.redownloadProduct ?? urlBag?.redownloadProduct) as string | undefined,
+      updateURL: (dict.updateProduct ?? urlBag?.updateProduct) as string | undefined,
+    };
+
     const bagValue = (key: string): string | undefined =>
       (dict[key] as string | undefined) ??
       (urlBag?.[key] as string | undefined);
@@ -79,10 +86,10 @@ export async function fetchBag(deviceId: string): Promise<BagOutput> {
       console.warn(
         "[Bag] authenticateAccount URL not found in bag, using default auth endpoint",
       );
-      return { authURL: defaultAuthURL, sapEndpoints };
+      return { authURL: defaultAuthURL, ...downloadURLs, sapEndpoints };
     }
 
-    return { authURL: normalizeAuthURL(authURL), sapEndpoints };
+    return { authURL: normalizeAuthURL(authURL), ...downloadURLs, sapEndpoints };
   } catch (error) {
     console.warn(
       `[Bag] Failed to fetch/parse bag, using default auth endpoint: ${

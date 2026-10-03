@@ -9,6 +9,7 @@ wisp.options.hostname_whitelist = [
   /^init\.itunes\.apple\.com$/,
   /^p\d+-buy\.itunes\.apple\.com$/,
   /^downloaddispatch\.itunes\.apple\.com$/,
+  /^uclient-api\.itunes\.apple\.com$/,
   // SAP setup hosts advertised by the bag (sign-sap-setup-cert, sign-sap-setup).
   /^s\.mzstatic\.com$/,
   /^fpinit\.itunes\.apple\.com$/,
