@@ -9,6 +9,9 @@ wisp.options.hostname_whitelist = [
   /^init\.itunes\.apple\.com$/,
   /^p\d+-buy\.itunes\.apple\.com$/,
   /^downloaddispatch\.itunes\.apple\.com$/,
+  // SAP setup hosts advertised by the bag (sign-sap-setup-cert, sign-sap-setup).
+  /^s\.mzstatic\.com$/,
+  /^fpinit\.itunes\.apple\.com$/,
 ];
 wisp.options.port_whitelist = [443];
 wisp.options.allow_direct_ip = false;

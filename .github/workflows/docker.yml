@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -48,11 +49,15 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          # linux/386 is not published by the official node images and the napi
-# binaries (@node-rs/crc32 via yauzl-promise) have no linux-ia32 build.
-platforms: linux/amd64,linux/arm64
+          # amd64 only: this fork's image runs on an x86-64 NAS. Upstream also
+          # builds linux/arm64 (linux/386 is not possible: the official node
+          # images and the @node-rs/crc32 napi binaries have no ia32 build).
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
