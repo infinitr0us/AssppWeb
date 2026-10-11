@@ -69,37 +69,42 @@ async function latestIOSVersion(
 ): Promise<string> {
   const country = storeIdToCountry(account.store);
   if (!country) throw new DownloadError('Unknown account storefront');
-  const params = new URLSearchParams({
-    version: '2',
-    id: String(app.id),
-    p: 'mdm-lockup',
-    caller: 'MDM',
-    platform: 'ios',
-    cc: country.toLowerCase(),
-    l: 'en',
-  });
-  const response = await appleRequest({
-    method: 'GET',
-    host: 'uclient-api.itunes.apple.com',
-    path: `/WebObjects/MZStorePlatform.woa/wa/lookup?${params}`,
-  });
-  if (response.status !== 200)
-    throw new DownloadError(`iOS version lookup: HTTP ${response.status}`);
-  const item = JSON.parse(response.body).results?.[String(app.id)];
-  if (!item || (app.bundleID && item.bundleId !== app.bundleID)) {
-    throw new DownloadError('iOS version lookup returned a different app');
+  // Some storefronts have no listing in the first catalog even though the
+  // consumer iPhone/iPad catalogs carry the app; try those next, keeping the
+  // account's country (ipatool's lookup order, ported from upstream #92).
+  for (const platform of ['ios', 'iphone', 'ipad']) {
+    const params = new URLSearchParams({
+      version: '2',
+      id: String(app.id),
+      p: 'mdm-lockup',
+      caller: 'MDM',
+      platform,
+      cc: country.toLowerCase(),
+      l: 'en',
+    });
+    const response = await appleRequest({
+      method: 'GET',
+      host: 'uclient-api.itunes.apple.com',
+      path: `/WebObjects/MZStorePlatform.woa/wa/lookup?${params}`,
+    });
+    if (response.status !== 200)
+      throw new DownloadError(`iOS version lookup: HTTP ${response.status}`);
+    const item = JSON.parse(response.body).results?.[String(app.id)];
+    if (!item?.offers?.length) continue;
+    if (app.bundleID && item.bundleId !== app.bundleID) {
+      throw new DownloadError('iOS version lookup returned a different app');
+    }
+    const offer = item.offers.find((o: any) =>
+      o.assets?.some((a: any) => a.flavor === 'iosSoftware'),
+    );
+    const version = String(
+      offer?.version?.externalId ??
+        new URLSearchParams(offer?.buyParams).get('appExtVrsId') ??
+        '',
+    );
+    if (/^[1-9]\d*$/.test(version)) return version;
   }
-  const offer = item.offers?.find((o: any) =>
-    o.assets?.some((a: any) => a.flavor === 'iosSoftware'),
-  );
-  const version = String(
-    offer?.version?.externalId ??
-      new URLSearchParams(offer?.buyParams).get('appExtVrsId') ??
-      '',
-  );
-  if (!/^[1-9]\d*$/.test(version))
-    throw new DownloadError('No iOS version available for download');
-  return version;
+  throw new DownloadError('No iOS version available for download');
 }
 
 function responseDict(

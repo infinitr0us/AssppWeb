@@ -129,3 +129,53 @@ it.each([
     }
   },
 );
+
+// A storefront may list the app only in the consumer iPhone/iPad catalogs.
+it.each([
+  { listedIn: 'iphone', expected: ['ios', 'iphone'] },
+  { listedIn: undefined, expected: ['ios', 'iphone', 'ipad'] },
+])(
+  'falls back through version lookup catalogs: %j',
+  async ({ listedIn, expected }) => {
+    const catalogs: string[] = [];
+    vi.mocked(appleRequest).mockImplementation(async (request) => {
+      if (request.host === 'uclient-api.itunes.apple.com') {
+        const platform = new URLSearchParams(request.path.split('?')[1]).get(
+          'platform',
+        )!;
+        catalogs.push(platform);
+        if (platform !== listedIn)
+          return response(JSON.stringify({ results: {} }));
+        return response(
+          JSON.stringify({
+            results: {
+              [app.id]: {
+                bundleId: app.bundleID,
+                offers: [
+                  {
+                    assets: [{ flavor: 'iosSoftware' }],
+                    version: { externalId: 891329111 },
+                  },
+                ],
+              },
+            },
+          }),
+        );
+      }
+      if (request.path.includes('volumeStoreDownloadProduct')) {
+        return response(buildPlist({ songList: [] }));
+      }
+      expect(parsePlist(request.body!).appExtVrsId).toBe('891329111');
+      return response(buildPlist({ songList: [{ metadata }] }));
+    });
+    if (listedIn) {
+      const result = await downloadProduct(account, app);
+      expect(result.dict.songList[0].metadata).toEqual(metadata);
+    } else {
+      await expect(downloadProduct(account, app)).rejects.toThrow(
+        'No iOS version available',
+      );
+    }
+    expect(catalogs).toEqual(expected);
+  },
+);
