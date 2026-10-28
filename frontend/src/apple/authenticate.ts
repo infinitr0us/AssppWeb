@@ -1,10 +1,12 @@
-import { appleRequest } from "./request";
-import { buildPlist, parsePlist } from "./plist";
-import { extractAndMergeCookies } from "./cookies";
-import { fetchBag, defaultAuthURL, normalizeAuthURL } from "./bag";
-import { prepareSigner } from "./sap/client";
-import i18n from "../i18n";
-import type { Account, Cookie } from "../types";
+import i18n from '../i18n';
+import { appleRequest } from './request';
+import { buildPlist, parsePlist } from './plist';
+import { extractAndMergeCookies } from './cookies';
+import { fetchBag, normalizeAuthURL } from './bag';
+import { connectSAP } from './sap';
+import { toBase64 } from './sap/bytes';
+import type { SAPSigner } from './sap/signer';
+import type { Account, Cookie } from '../types';
 
 export class AuthenticationError extends Error {
   constructor(
@@ -12,7 +14,7 @@ export class AuthenticationError extends Error {
     public readonly codeRequired: boolean = false,
   ) {
     super(message);
-    this.name = "AuthenticationError";
+    this.name = 'AuthenticationError';
   }
 }
 
@@ -33,12 +35,7 @@ const AUTH_RETRY_DELAY_MS = 10_000;
 const MAX_AUTH_RETRY_DELAY_MS = 30_000;
 
 function isTransientAuthStatus(status: number): boolean {
-  return (
-    status === 204 ||
-    status === 404 ||
-    status === 429 ||
-    Math.floor(status / 100) === 5
-  );
+  return status === 204 || status === 404 || status === 429 || Math.floor(status / 100) === 5;
 }
 
 function retryAfterMs(header: string | undefined): number | undefined {
@@ -63,22 +60,19 @@ async function sendWithTransientRetry(
     statuses.push(response.status);
     if (statuses.length === AUTH_REQUEST_ATTEMPTS) {
       throw new AuthenticationError(
-        i18n.t("errors.auth.transientFailure", {
+        i18n.t('errors.auth.transientFailure', {
           attempts: AUTH_REQUEST_ATTEMPTS,
-          statuses: statuses.join(", "),
+          statuses: statuses.join(', '),
         }),
       );
     }
 
-    let delayMs = Math.min(
-      AUTH_RETRY_DELAY_MS * 2 ** (statuses.length - 1),
-      MAX_AUTH_RETRY_DELAY_MS,
-    );
-    const requested = retryAfterMs(response.headers["retry-after"]);
+    let delayMs = Math.min(AUTH_RETRY_DELAY_MS * 2 ** (statuses.length - 1), MAX_AUTH_RETRY_DELAY_MS);
+    const requested = retryAfterMs(response.headers['retry-after']);
     if (requested !== undefined) {
       if (requested > MAX_AUTH_RETRY_DELAY_MS) {
         throw new AuthenticationError(
-          i18n.t("errors.auth.retryLater", {
+          i18n.t('errors.auth.retryLater', {
             seconds: Math.ceil(requested / 1000),
           }),
         );
@@ -96,171 +90,199 @@ async function sendWithTransientRetry(
   }
 }
 
+function approvedAuthEndpoint(value: string): URL {
+  const url = new URL(value);
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.port ||
+    !/^(?:auth|buy|p\d+-buy)\.itunes\.apple\.com$/.test(url.hostname)
+  ) {
+    throw new Error('Authentication requires an approved Apple HTTPS endpoint');
+  }
+  return url;
+}
+
+interface AuthSession {
+  signer: SAPSigner;
+  cookies: Cookie[];
+  storeFront: string;
+  requestHost: string;
+  requestPath: string;
+  pod?: string;
+}
+
+/** Retain this instance when continuing with a verification code. */
+export class Authenticator {
+  private session?: AuthSession;
+  private busy = false;
+
+  constructor(
+    private readonly deviceId: string,
+    private readonly existingCookies: Cookie[] = [],
+  ) {}
+
+  private async connect(): Promise<AuthSession> {
+    const bag = await fetchBag(this.deviceId);
+    const endpoint = approvedAuthEndpoint(normalizeAuthURL(bag.authURL));
+    endpoint.searchParams.set('guid', this.deviceId);
+    const signer = await connectSAP();
+    return {
+      signer,
+      cookies: [...this.existingCookies],
+      storeFront: '',
+      requestHost: endpoint.hostname,
+      requestPath: endpoint.pathname + endpoint.search,
+    };
+  }
+
+  async authenticate(
+    email: string,
+    password: string,
+    code?: string,
+    onRetry?: (retry: AuthRetry) => void,
+  ): Promise<Account> {
+    if (this.busy) throw new Error('An authentication request is already in progress');
+    this.busy = true;
+    try {
+      const session = (this.session ??= await this.connect());
+      let { cookies, storeFront, requestHost, requestPath, pod } = session;
+      const deviceId = this.deviceId;
+      let lastError: Error | null = null;
+      try {
+        let currentAttempt = 0;
+        let redirectAttempt = 0;
+
+        while (currentAttempt < 2 && redirectAttempt <= 3) {
+          currentAttempt++;
+
+          try {
+            const body: Record<string, string> = {
+              appleId: email,
+              attempt: code ? '2' : '4',
+              guid: deviceId,
+              password: code ? `${password}${code}` : password,
+              rmp: '0',
+              why: 'signIn',
+            };
+
+            const plistBody = buildPlist(body);
+
+            const response = await sendWithTransientRetry(async () => {
+              const headers: Record<string, string> = {
+                'Content-Type': 'application/x-apple-plist',
+                'X-Apple-ActionSignature': toBase64(await session.signer.sign(new TextEncoder().encode(plistBody))),
+              };
+
+              const sent = await appleRequest({
+                method: 'POST',
+                host: requestHost,
+                path: requestPath,
+                headers,
+                body: plistBody,
+                cookies,
+              });
+              cookies = extractAndMergeCookies(sent.rawHeaders, cookies);
+              return sent;
+            }, onRetry);
+
+            // Read store front
+            const storeHeader = response.headers['x-set-apple-store-front'];
+            if (storeHeader) {
+              const parts = storeHeader.split('-');
+              if (parts[0]) {
+                storeFront = parts[0];
+              }
+            }
+
+            // Read pod
+            pod = response.headers['pod'] || pod;
+
+            // Handle redirect. The native /fast auth host can answer with 301 as
+            // well as the usual 302, so follow the full set of redirect statuses.
+            if ([301, 302, 303, 307, 308].includes(response.status)) {
+              const location = response.headers['location'];
+              if (!location) {
+                throw new Error(i18n.t('errors.auth.redirectLocation'));
+              }
+              const redirectURL = new URL(location, `https://${requestHost}${requestPath}`);
+              const url = approvedAuthEndpoint(normalizeAuthURL(redirectURL.toString()));
+              requestHost = url.hostname;
+              requestPath = url.pathname + url.search;
+              currentAttempt--;
+              redirectAttempt++;
+              continue;
+            }
+
+            if (response.status !== 200) throw new Error(`Authentication failed (HTTP ${response.status})`);
+
+            // Handle non-plist responses (e.g. 403 with empty body)
+            if (!response.body.trim()) {
+              throw new Error(i18n.t('errors.auth.emptyBody', { status: response.status }));
+            }
+
+            const dict = parsePlist(response.body) as Record<string, any>;
+
+            // Check for 2FA requirement
+            if (
+              dict.failureType === '' &&
+              !code &&
+              dict.customerMessage === 'MZFinance.BadLogin.Configurator_message'
+            ) {
+              throw new AuthenticationError(i18n.t('errors.auth.requiresVerification'), true);
+            }
+
+            const failureMessage = (dict.dialog as Record<string, any>)?.explanation ?? dict.customerMessage;
+
+            const accountInfo = dict.accountInfo as Record<string, any>;
+            if (!accountInfo) {
+              throw new Error(failureMessage ?? i18n.t('errors.auth.missingAccountInfo'));
+            }
+
+            const address = accountInfo.address as Record<string, any>;
+            if (!address) {
+              throw new Error(failureMessage ?? i18n.t('errors.auth.missingAddress'));
+            }
+
+            const account: Account = {
+              email,
+              password,
+              appleId: (accountInfo.appleId as string) ?? '',
+              store: storeFront,
+              firstName: (address.firstName as string) ?? '',
+              lastName: (address.lastName as string) ?? '',
+              passwordToken: (dict.passwordToken as string) ?? '',
+              directoryServicesIdentifier: String(dict.dsPersonId ?? ''),
+              cookies,
+              deviceIdentifier: deviceId,
+              pod,
+            };
+
+            return account;
+          } catch (e) {
+            if (e instanceof AuthenticationError) throw e;
+            lastError = e instanceof Error ? e : new Error(String(e));
+          }
+        }
+
+        throw lastError ?? new Error(i18n.t('errors.auth.unknownReason'));
+      } finally {
+        Object.assign(session, { cookies, storeFront, requestHost, requestPath, pod });
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+}
+
 export async function authenticate(
   email: string,
   password: string,
   code?: string,
   existingCookies?: Cookie[],
-  deviceId: string = "",
+  deviceId: string = '',
   onRetry?: (retry: AuthRetry) => void,
 ): Promise<Account> {
-  let cookies: Cookie[] = existingCookies ? [...existingCookies] : [];
-  let storeFront = "";
-  let lastError: Error | null = null;
-
-  const defaultAuthEndpoint = new URL(defaultAuthURL);
-  defaultAuthEndpoint.searchParams.set("guid", deviceId);
-  let requestHost = defaultAuthEndpoint.hostname;
-  let requestPath = `${defaultAuthEndpoint.pathname}${defaultAuthEndpoint.search}`;
-
-  const bag = await fetchBag(deviceId);
-  const authEndpoint = new URL(normalizeAuthURL(bag.authURL));
-  authEndpoint.searchParams.set("guid", deviceId);
-  requestHost = authEndpoint.hostname;
-  requestPath = `${authEndpoint.pathname}${authEndpoint.search}`;
-
-  // When the bag advertises the SAP signing protocol, every request to the
-  // auth endpoint must carry X-Apple-ActionSignature over its body bytes.
-  // The signer sees only the hardware ID and public Apple assets — never the
-  // password — because signing happens here in the browser. It is kept as a
-  // singleton between attempts (2FA retries reuse the same session).
-  let sapSigner = null as Awaited<ReturnType<typeof prepareSigner>> | null;
-  if (bag.sapEndpoints) {
-    sapSigner = await prepareSigner(deviceId, bag.sapEndpoints);
-  }
-
-  let currentAttempt = 0;
-  let redirectAttempt = 0;
-
-  while (currentAttempt < 2 && redirectAttempt <= 3) {
-    currentAttempt++;
-
-    try {
-      const body: Record<string, string> = {
-        appleId: email,
-        attempt: code ? "2" : "4",
-        guid: deviceId,
-        password: code ? `${password}${code}` : password,
-        rmp: "0",
-        why: "signIn",
-      };
-
-      const plistBody = buildPlist(body);
-
-      const response = await sendWithTransientRetry(async () => {
-        const headers: Record<string, string> = {
-          "Content-Type": "application/x-apple-plist",
-        };
-
-        if (sapSigner) {
-          // The signature must cover the exact bytes on the wire; libcurl
-          // sends the body string as UTF-8, so sign its encoded form. Each
-          // replay is signed afresh.
-          headers["X-Apple-ActionSignature"] = await sapSigner.sign(
-            new TextEncoder().encode(plistBody),
-          );
-        }
-
-        const sent = await appleRequest({
-          method: "POST",
-          host: requestHost,
-          path: requestPath,
-          headers,
-          body: plistBody,
-          cookies,
-        });
-        cookies = extractAndMergeCookies(sent.rawHeaders, cookies);
-        return sent;
-      }, onRetry);
-
-      // Read store front
-      const storeHeader = response.headers["x-set-apple-store-front"];
-      if (storeHeader) {
-        const parts = storeHeader.split("-");
-        if (parts[0]) {
-          storeFront = parts[0];
-        }
-      }
-
-      // Read pod
-      const podHeader = response.headers["pod"];
-      const pod = podHeader || undefined;
-
-      // Handle redirect. The native /fast auth host can answer with 301 as
-      // well as the usual 302, so follow the full set of redirect statuses.
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        const location = response.headers["location"];
-        if (!location) {
-          throw new Error(i18n.t("errors.auth.redirectLocation"));
-        }
-        const redirectURL = new URL(location, `https://${requestHost}${requestPath}`);
-        const url = new URL(normalizeAuthURL(redirectURL.toString()));
-        requestHost = url.hostname;
-        requestPath = url.pathname + url.search;
-        currentAttempt--;
-        redirectAttempt++;
-        continue;
-      }
-
-      // Handle non-plist responses (e.g. 403 with empty body)
-      if (!response.body.trim()) {
-        throw new Error(
-          i18n.t("errors.auth.emptyBody", { status: response.status }),
-        );
-      }
-
-      const dict = parsePlist(response.body) as Record<string, any>;
-
-      // Check for 2FA requirement
-      if (
-        dict.failureType === "" &&
-        !code &&
-        dict.customerMessage === "MZFinance.BadLogin.Configurator_message"
-      ) {
-        throw new AuthenticationError(
-          i18n.t("errors.auth.requiresVerification"),
-          true,
-        );
-      }
-
-      const failureMessage =
-        (dict.dialog as Record<string, any>)?.explanation ??
-        dict.customerMessage;
-
-      const accountInfo = dict.accountInfo as Record<string, any>;
-      if (!accountInfo) {
-        throw new Error(
-          failureMessage ?? i18n.t("errors.auth.missingAccountInfo"),
-        );
-      }
-
-      const address = accountInfo.address as Record<string, any>;
-      if (!address) {
-        throw new Error(failureMessage ?? i18n.t("errors.auth.missingAddress"));
-      }
-
-      const account: Account = {
-        email,
-        password,
-        appleId: (accountInfo.appleId as string) ?? "",
-        store: storeFront,
-        firstName: (address.firstName as string) ?? "",
-        lastName: (address.lastName as string) ?? "",
-        passwordToken: (dict.passwordToken as string) ?? "",
-        directoryServicesIdentifier: String(dict.dsPersonId ?? ""),
-        cookies,
-        deviceIdentifier: deviceId,
-        pod,
-      };
-
-      return account;
-    } catch (e) {
-      if (e instanceof AuthenticationError) {
-        throw e;
-      }
-      lastError = e instanceof Error ? e : new Error(String(e));
-    }
-  }
-
-  throw lastError ?? new Error(i18n.t("errors.auth.unknownReason"));
+  return new Authenticator(deviceId, existingCookies).authenticate(email, password, code, onRetry);
 }

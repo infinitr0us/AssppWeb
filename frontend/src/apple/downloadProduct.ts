@@ -1,13 +1,10 @@
+import i18n from '../i18n';
 import { fetchBag } from './bag';
-import {
-  redownloadEndpoint,
-  storeIdToCountry,
-  volumeStoreEndpoint,
-} from './config';
+import { lookupLatestVersion } from './latestVersion';
 import { extractAndMergeCookies } from './cookies';
 import { buildPlist, parsePlist } from './plist';
 import { appleRequest } from './request';
-import i18n from '../i18n';
+import { redownloadEndpoint, volumeStoreEndpoint } from './config';
 import type { StoreDownloadEndpoint } from './config';
 import type { AppleResponse } from './request';
 import type { Account, Software } from '../types';
@@ -25,24 +22,27 @@ export class DownloadError extends Error {
 // Only the observed empty/unavailable responses permit endpoint recovery.
 // Authentication, license, and other structured failures must not be hidden.
 export function needsDownloadFallback(dict: Record<string, any>): boolean {
-  if (dict.songList?.length) return false;
+  if (dict.songList?.length || dict.dialog || dict.action) return false;
   if (dict.failureType) return String(dict.failureType) === '5002';
+  if (dict.status !== undefined && Number(dict.status) !== 0) return false;
   const message = String(dict.customerMessage ?? '')
     .trim()
     .toLowerCase();
-  return (
-    !message ||
-    message === 'no longer available' ||
-    message.endsWith(' no longer available')
-  );
+  return !message || message === 'no longer available' || message.endsWith(' no longer available');
 }
 
 export function dispatchEndpoint(
-  raw: string,
+  raw: string | undefined,
   kind: 'redownload' | 'update',
   deviceId: string,
-): StoreDownloadEndpoint {
-  const url = new URL(raw);
+): StoreDownloadEndpoint | undefined {
+  if (!raw) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
   const path = kind === 'redownload' ? '/r/redownload' : '/up/updateProduct';
   if (
     url.protocol !== 'https:' ||
@@ -53,7 +53,7 @@ export function dispatchEndpoint(
     url.username ||
     url.password
   ) {
-    throw new DownloadError('Invalid download endpoint in Apple bag');
+    return undefined;
   }
   url.searchParams.set('guid', deviceId);
   return {
@@ -63,123 +63,53 @@ export function dispatchEndpoint(
   };
 }
 
-async function latestIOSVersion(
-  account: Account,
-  app: Software,
-): Promise<string> {
-  const country = storeIdToCountry(account.store);
-  if (!country) throw new DownloadError('Unknown account storefront');
-  // Some storefronts have no listing in the first catalog even though the
-  // consumer iPhone/iPad catalogs carry the app; try those next, keeping the
-  // account's country (ipatool's lookup order, ported from upstream #92).
-  for (const platform of ['ios', 'iphone', 'ipad']) {
-    const params = new URLSearchParams({
-      version: '2',
-      id: String(app.id),
-      p: 'mdm-lockup',
-      caller: 'MDM',
-      platform,
-      cc: country.toLowerCase(),
-      l: 'en',
-    });
-    const response = await appleRequest({
-      method: 'GET',
-      host: 'uclient-api.itunes.apple.com',
-      path: `/WebObjects/MZStorePlatform.woa/wa/lookup?${params}`,
-    });
-    if (response.status !== 200)
-      throw new DownloadError(`iOS version lookup: HTTP ${response.status}`);
-    const item = JSON.parse(response.body).results?.[String(app.id)];
-    if (!item?.offers?.length) continue;
-    if (app.bundleID && item.bundleId !== app.bundleID) {
-      throw new DownloadError('iOS version lookup returned a different app');
+// Errors identify the endpoint without exposing bodies, queries, or account values.
+function responseDict(response: AppleResponse, endpoint: StoreDownloadEndpoint): Record<string, any> {
+  if (response.status === 200) {
+    try {
+      const dict = parsePlist(response.body);
+      if (dict && typeof dict === 'object' && !Array.isArray(dict)) return dict;
+    } catch {
+      // Report the same safe diagnostic for every malformed response.
     }
-    const offer = item.offers.find((o: any) =>
-      o.assets?.some((a: any) => a.flavor === 'iosSoftware'),
-    );
-    const version = String(
-      offer?.version?.externalId ??
-        new URLSearchParams(offer?.buyParams).get('appExtVrsId') ??
-        '',
-    );
-    if (/^[1-9]\d*$/.test(version)) return version;
   }
-  throw new DownloadError('No iOS version available for download');
-}
-
-function responseDict(
-  response: AppleResponse,
-  endpoint: StoreDownloadEndpoint,
-): Record<string, any> {
-  const label = endpoint.path.split('?')[0];
-  if (response.status !== 200)
-    throw new DownloadError(
-      `${label}: HTTP ${response.status}${response.body.trim() ? '' : ' (empty response)'}`,
-    );
-  try {
-    return parsePlist(response.body);
-  } catch {
-    throw new DownloadError(
-      `${label}: HTTP ${response.status}, invalid plist response`,
-    );
-  }
+  const kind = response.body.trim() ? 'invalid plist' : 'empty response';
+  const location = endpoint.host + endpoint.path.split('?')[0];
+  throw new DownloadError(`Apple download: HTTP ${response.status}; ${kind}; ${location}`);
 }
 
 function requireItems(dict: Record<string, any>): void {
   const code = String(dict.failureType ?? '');
   if (code) {
-    if (
-      ['2034', '2042'].includes(code) ||
-      dict.customerMessage === 'Your password has changed.'
-    ) {
+    if (['2034', '2042'].includes(code) || dict.customerMessage === 'Your password has changed.') {
       throw new DownloadError(i18n.t('errors.download.passwordExpired'), code);
     }
-    if (code === '9610')
-      throw new DownloadError(i18n.t('errors.download.licenseRequired'), code);
-    throw new DownloadError(
-      `${dict.customerMessage || 'Apple download failed'} (${code})`,
-      code,
-    );
+    if (code === '9610') throw new DownloadError(i18n.t('errors.download.licenseRequired'), code);
+    throw new DownloadError(`${dict.customerMessage || 'Apple download failed'} (${code})`, code);
   }
   if (!Array.isArray(dict.songList) || !dict.songList.length) {
-    throw new DownloadError(
-      dict.customerMessage || i18n.t('errors.download.noItems'),
-    );
+    throw new DownloadError(dict.customerMessage || i18n.t('errors.download.noItems'));
   }
 }
 
-function validateDownloadItem(
-  dict: Record<string, any>,
-  app: Software,
-  version?: string,
-): void {
+function validateDownloadItem(dict: Record<string, any>, app: Software, version?: string): void {
   const metadata = dict.songList[0]?.metadata;
   if (
     dict.songList.length !== 1 ||
     !metadata ||
     String(metadata.itemId) !== String(app.id) ||
-    (version &&
-      String(metadata.softwareVersionExternalIdentifier) !== version) ||
+    (version && String(metadata.softwareVersionExternalIdentifier) !== version) ||
     !metadata.softwareVersionBundleId ||
     (app.bundleID && metadata.softwareVersionBundleId !== app.bundleID)
   ) {
-    throw new DownloadError(
-      'Apple download response does not match the requested app/version',
-    );
+    throw new DownloadError(i18n.t('errors.download.unexpectedItem'));
   }
 }
 
 /** Shared protocol for downloads, version lists, and pinned version metadata. */
-export async function downloadProduct(
-  account: Account,
-  app: Software,
-  versionId?: string,
-) {
+export async function downloadProduct(account: Account, app: Software, versionId?: string) {
   let cookies = [...account.cookies];
-  const send = async (
-    endpoint: StoreDownloadEndpoint,
-    version?: string,
-  ): Promise<AppleResponse> => {
+  const send = async (endpoint: StoreDownloadEndpoint, version?: string): Promise<AppleResponse> => {
     const payload: Record<string, unknown> = {
       creditDisplay: '',
       guid: account.deviceIdentifier,
@@ -204,17 +134,14 @@ export async function downloadProduct(
       });
       cookies = extractAndMergeCookies(response.rawHeaders, cookies);
       if (![301, 302, 303, 307, 308].includes(response.status)) return response;
-      if (!response.headers.location)
-        throw new DownloadError('Missing Apple download redirect location');
+      if (!response.headers.location) throw new DownloadError('Missing Apple download redirect location');
       const url = new URL(response.headers.location, `https://${host}${path}`);
       if (
         url.protocol !== 'https:' ||
         url.port ||
         url.username ||
         url.password ||
-        !/^(?:(?:p\d+-)?buy|downloaddispatch)\.itunes\.apple\.com$/.test(
-          url.hostname,
-        )
+        !/^(?:(?:p\d+-)?buy|downloaddispatch)\.itunes\.apple\.com$/.test(url.hostname)
       ) {
         throw new DownloadError('Unsafe Apple download redirect');
       }
@@ -228,31 +155,30 @@ export async function downloadProduct(
   let dict = responseDict(await send(primary, versionId), primary);
   if (!needsDownloadFallback(dict)) {
     requireItems(dict);
-    validateDownloadItem(dict, app, versionId);
     return { dict, updatedCookies: cookies };
   }
 
   const bag = await fetchBag(account.deviceIdentifier);
   // An unpinned dispatch request may return HTTP 500 or the tvOS build.
-  const pinnedVersion = versionId || (await latestIOSVersion(account, app));
-  const redownload = bag.redownloadURL
-    ? dispatchEndpoint(
-        bag.redownloadURL,
-        'redownload',
-        account.deviceIdentifier,
-      )
-    : redownloadEndpoint(account.deviceIdentifier);
+  let pinnedVersion = versionId;
+  if (!pinnedVersion) {
+    try {
+      pinnedVersion = await lookupLatestVersion(account, app);
+    } catch {
+      throw new DownloadError(i18n.t('errors.download.versionLookupFailed'));
+    }
+  }
+  const redownload =
+    dispatchEndpoint(bag.redownloadURL, 'redownload', account.deviceIdentifier) ??
+    redownloadEndpoint(account.deviceIdentifier);
   const response = await send(redownload, pinnedVersion);
   const emptyServerError = response.status === 500 && !response.body.trim();
   if (!emptyServerError) dict = responseDict(response, redownload);
-  const recoverable = !emptyServerError && needsDownloadFallback(dict);
+  const recoverable =
+    !emptyServerError && needsDownloadFallback(dict) && (Boolean(dict.failureType) || Boolean(dict.customerMessage));
 
-  if (bag.updateURL && (emptyServerError || recoverable)) {
-    const update = dispatchEndpoint(
-      bag.updateURL,
-      'update',
-      account.deviceIdentifier,
-    );
+  const update = dispatchEndpoint(bag.updateURL, 'update', account.deviceIdentifier);
+  if (update && (emptyServerError || recoverable)) {
     dict = responseDict(await send(update, pinnedVersion), update);
   } else if (emptyServerError) {
     responseDict(response, redownload); // Preserve the HTTP failure, not an XML parser error.

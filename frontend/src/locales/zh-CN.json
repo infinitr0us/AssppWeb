@@ -114,10 +114,7 @@
       "retrying": "Apple 暂未响应（HTTP {{status}}），{{seconds}} 秒后重试（第 {{attempt}}/{{attempts}} 次）…",
       "cancel": "取消",
       "authFailed": "认证失败",
-      "addSuccess": "账号添加成功。",
-      "preparingAssets": "正在准备签名组件 {{percent}}%",
-      "preparingSigner": "正在初始化签名器…",
-      "signerFailed": "签名组件准备失败：{{error}}"
+      "addSuccess": "账号添加成功。"
     },
     "detail": {
       "title": "账号详情",
@@ -439,7 +436,9 @@
       "missingVersion": "缺少所需的版本信息",
       "invalidSinf": "无效的 sinf 项目",
       "noSinf": "响应中未找到 sinf",
-      "tooManyRedirects": "重定向次数过多"
+      "tooManyRedirects": "重定向次数过多",
+      "versionLookupFailed": "无法查询账号所在商店的最新 iOS 版本，请确认应用在该地区可用。",
+      "unexpectedItem": "Apple 返回的应用或版本与请求不符，已停止下载。"
     },
     "purchase": {
       "paidNotSupported": "不支持购买付费应用",
@@ -468,6 +467,7 @@
       "downloadSuccess": "下载成功",
       "downloadFailed": "下载失败",
       "licenseSuccess": "获取许可证成功",
+      "licenseOwned": "已拥有许可证",
       "licenseFailed": "获取许可证失败",
       "installStarted": "开始安装",
       "shareAcquired": "链接已获取",

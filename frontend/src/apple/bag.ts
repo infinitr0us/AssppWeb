@@ -1,19 +1,15 @@
-import { authHeaders } from "../api/client";
-import { parsePlist } from "./plist";
-import type { SapEndpoints } from "./sap/types";
+import { authHeaders } from '../api/client';
+import { parsePlist } from './plist';
 
 export interface BagOutput {
   authURL: string;
   redownloadURL?: string;
   updateURL?: string;
-  /** Present when the bag advertises the SAP signing protocol. */
-  sapEndpoints?: SapEndpoints;
 }
 
-export const defaultAuthURL =
-  "https://auth.itunes.apple.com/auth/v1/native/fast/";
+export const defaultAuthURL = 'https://auth.itunes.apple.com/auth/v1/native/fast/';
 
-const NATIVE_AUTH_HOST = "auth.itunes.apple.com";
+const NATIVE_AUTH_HOST = 'auth.itunes.apple.com';
 
 // The bag advertises the native auth endpoint without the /fast/ sub-path that
 // the login flow requires; the no-trailing-slash variant 301s to an HTML page.
@@ -36,9 +32,9 @@ export function normalizeAuthURL(rawURL: string): string {
   if (url.hostname !== NATIVE_AUTH_HOST) {
     return rawURL;
   }
-  let path = url.pathname.replace(/\/+$/, "");
-  if (!path.endsWith("/fast")) {
-    path += "/fast";
+  let path = url.pathname.replace(/\/+$/, '');
+  if (!path.endsWith('/fast')) {
+    path += '/fast';
   }
   url.pathname = `${path}/`;
   return url.toString();
@@ -54,9 +50,7 @@ export async function fetchBag(deviceId: string): Promise<BagOutput> {
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: resp.statusText }));
-      console.warn(
-        `[Bag] Proxy request failed, using default auth endpoint: ${err.error || `HTTP ${resp.status}`}`,
-      );
+      console.warn(`[Bag] Proxy request failed, using default auth endpoint: ${err.error || `HTTP ${resp.status}`}`);
       return { authURL: defaultAuthURL };
     }
 
@@ -67,37 +61,19 @@ export async function fetchBag(deviceId: string): Promise<BagOutput> {
     // responses move it to the plist root, so prefer the root and fall back.
     const urlBag = dict.urlBag as Record<string, any> | undefined;
     const authURL =
-      (dict.authenticateAccount as string | undefined) ??
-      (urlBag?.authenticateAccount as string | undefined);
+      (dict.authenticateAccount as string | undefined) ?? (urlBag?.authenticateAccount as string | undefined);
 
     const downloadURLs = {
       redownloadURL: (dict.redownloadProduct ?? urlBag?.redownloadProduct) as string | undefined,
       updateURL: (dict.updateProduct ?? urlBag?.updateProduct) as string | undefined,
     };
 
-    const bagValue = (key: string): string | undefined =>
-      (dict[key] as string | undefined) ??
-      (urlBag?.[key] as string | undefined);
-
-    const setupURL = bagValue("sign-sap-setup");
-    const certificateURL = bagValue("sign-sap-setup-cert");
-    const versionText = bagValue("sign-sap-version");
-    let sapEndpoints: SapEndpoints | undefined;
-    if (setupURL && certificateURL && versionText) {
-      const version = Number.parseInt(versionText, 10);
-      if (Number.isFinite(version)) {
-        sapEndpoints = { setupURL, certificateURL, version };
-      }
-    }
-
     if (!authURL) {
-      console.warn(
-        "[Bag] authenticateAccount URL not found in bag, using default auth endpoint",
-      );
-      return { authURL: defaultAuthURL, ...downloadURLs, sapEndpoints };
+      console.warn('[Bag] authenticateAccount URL not found in bag, using default auth endpoint');
+      return { authURL: defaultAuthURL, ...downloadURLs };
     }
 
-    return { authURL: normalizeAuthURL(authURL), ...downloadURLs, sapEndpoints };
+    return { authURL: normalizeAuthURL(authURL), ...downloadURLs };
   } catch (error) {
     console.warn(
       `[Bag] Failed to fetch/parse bag, using default auth endpoint: ${

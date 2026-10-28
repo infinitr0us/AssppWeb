@@ -114,10 +114,7 @@
       "retrying": "Apple did not respond (HTTP {{status}}). Retrying in {{seconds}}s (attempt {{attempt}} of {{attempts}})…",
       "cancel": "Cancel",
       "authFailed": "Authentication failed",
-      "addSuccess": "Account added successfully.",
-      "preparingAssets": "Preparing signing components {{percent}}%",
-      "preparingSigner": "Initializing the request signer…",
-      "signerFailed": "Failed to prepare signing components: {{error}}"
+      "addSuccess": "Account added successfully."
     },
     "detail": {
       "title": "Account Details",
@@ -439,7 +436,9 @@
       "missingVersion": "Missing required version information",
       "invalidSinf": "Invalid sinf item",
       "noSinf": "No sinf found in response",
-      "tooManyRedirects": "Too many redirects"
+      "tooManyRedirects": "Too many redirects",
+      "versionLookupFailed": "Unable to resolve the latest iOS version in this account’s storefront. Check app availability in that region.",
+      "unexpectedItem": "Apple returned a different app or version; download stopped."
     },
     "purchase": {
       "paidNotSupported": "Purchasing paid apps is not supported",
@@ -468,6 +467,7 @@
       "downloadSuccess": "Download Success",
       "downloadFailed": "Download Failed",
       "licenseSuccess": "License Acquired",
+      "licenseOwned": "License Already Owned",
       "licenseFailed": "License Failed",
       "installStarted": "Installation Started",
       "shareAcquired": "Link Acquired",

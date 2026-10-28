@@ -1,118 +1,39 @@
-// SAP signer: sequences the emulated CommerceKit entry points through the
-// Apple setup key exchange and per-request signing. The machine driver can be
-// the in-process SapMachine (tests) or a Web Worker proxy (production); setup
-// network calls run on the caller's thread so they ride the wisp tunnel.
+import { be32, concat, digest, xor } from './bytes';
+import { createCipher } from './cipher';
+import { deriveF2 } from './f2';
+import { data, loadTables } from './tables';
+import type { Bytes } from './bytes';
+import type { SAPSession } from './handshake';
 
-import {
-  validateSapSignerOptions,
-  type SapSignerOptions,
-} from "./types";
-
-export interface SapMachineDriver {
-  initialize(hardwareID: Uint8Array): Promise<number>;
-  exchange(
-    version: number,
-    hardwareID: Uint8Array,
-    contextValue: number,
-    input: Uint8Array,
-  ): Promise<{ output: Uint8Array; state: number }>;
-  sign(contextValue: number, input: Uint8Array): Promise<Uint8Array>;
-  teardown(contextValue: number): Promise<void>;
-  close(): Promise<void>;
-}
-
-export interface SapSignerNetwork {
-  fetchCertificate: () => Promise<Uint8Array>;
-  exchange: (input: Uint8Array) => Promise<Uint8Array>;
-}
-
-export class SapSigner {
-  private closed = false;
-
-  private constructor(
-    private readonly driver: SapMachineDriver,
-    private readonly context: number,
-  ) {}
-
-  /**
-   * Completes the Apple key exchange: initialize -> GET certificate ->
-   * exchange(state 1) -> POST setup -> exchange(state 0).
-   */
-  static async create(
-    options: SapSignerOptions,
-    driver: SapMachineDriver,
-    network: SapSignerNetwork,
-  ): Promise<SapSigner> {
-    validateSapSignerOptions(options);
-
-    let context = 0;
-    try {
-      context = await driver.initialize(options.hardwareID);
-
-      const certificate = await network.fetchCertificate();
-      const first = await driver.exchange(
-        options.version,
-        options.hardwareID,
-        context,
-        certificate,
-      );
-      if (first.state !== 1) {
-        throw new Error(`SAP setup entered unexpected state ${first.state}`);
-      }
-      if (first.output.length === 0) {
-        throw new Error("SAP setup message is empty");
-      }
-
-      const reply = await network.exchange(first.output);
-      const second = await driver.exchange(
-        options.version,
-        options.hardwareID,
-        context,
-        reply,
-      );
-      if (second.state !== 0) {
-        throw new Error(
-          `SAP setup completed in unexpected state ${second.state}`,
+export async function createSigner(session: SAPSession, platform = 1) {
+  const tables = await loadTables();
+  const encrypt = createCipher(session.source, tables);
+  const f2 = concat(deriveF2(session.f2Input1, session.f2Input2, tables), session.f2Tail);
+  let blob: Bytes | undefined;
+  return {
+    async sign(body: Bytes): Promise<Bytes> {
+      if (!blob) {
+        const f1 = session.random.f1(session.seed30, session.f1Address);
+        blob = concat(
+          Uint8Array.of(3),
+          be32(platform),
+          be32(256),
+          f1,
+          be32(f2.length),
+          f2,
+          be32(session.f3.length),
+          session.f3,
         );
+        blob = concat(blob, new Uint8Array((16 - (blob.length % 16)) % 16));
       }
-    } catch (error) {
-      await driver.close().catch(() => undefined);
-      throw error;
-    }
-
-    return new SapSigner(driver, context);
-  }
-
-  /** Signs request-body bytes; returns the X-Apple-ActionSignature value. */
-  async sign(input: Uint8Array): Promise<string> {
-    if (this.closed) {
-      throw new Error("SAP signer is closed");
-    }
-    const signature = await this.driver.sign(this.context, input);
-    if (signature.length === 0) {
-      throw new Error("SAP signing produced an empty signature");
-    }
-    return bytesToBase64(signature);
-  }
-
-  async close(): Promise<void> {
-    if (this.closed) {
-      return;
-    }
-    this.closed = true;
-    try {
-      await this.driver.teardown(this.context);
-    } finally {
-      await this.driver.close();
-    }
-  }
+      // Advance the stream before awaiting so concurrent callers cannot reuse an IV.
+      const iv = session.random.fill(session.seed54, session.ivAddress, data.IV_WHITEN, 0x12, 16);
+      const hash = await digest('SHA-1', concat(blob, body));
+      const first = encrypt(xor(iv, hash.slice(0, 16)));
+      const tag = encrypt(xor(first, concat(hash.slice(16), new Uint8Array(12))));
+      return concat(Uint8Array.of(2), iv, tag, be32(blob.length), blob);
+    },
+  };
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
-  }
-  return btoa(binary);
-}
+export type SAPSigner = Awaited<ReturnType<typeof createSigner>>;
