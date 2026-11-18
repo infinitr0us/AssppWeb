@@ -1,0 +1,37 @@
+# Dependency updates for the fork. Upstream (Lakr233/AssppWeb) was archived on
+# 2026-11-18, so nothing upstream keeps these dependencies current any more.
+#
+# On a fork, version updates also have to be switched on once in the repository
+# settings (Advanced Security > Dependabot version updates > Enable).
+#
+# The Docker base image is not listed: the Dockerfile uses the floating
+# node:24-alpine tag, so every build already picks up the latest Node 24 and
+# Alpine patches, and Dependabot would only offer Node major-version jumps.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /backend
+      - /frontend
+    schedule:
+      interval: monthly
+    # Skip releases younger than a week (npm supply-chain attacks are usually
+    # caught within days). Security updates are not delayed by this.
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+      major:
+        update-types: [major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
