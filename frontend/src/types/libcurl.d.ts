@@ -20,7 +20,20 @@ declare module 'libcurl.js' {
     _libcurl_http_version?: number;
   }
 
+  interface LibcurlHTTPSessionOptions {
+    enable_cookies?: boolean;
+    cookie_jar?: string;
+    proxy?: string;
+  }
+
+  /** A connection pool of its own; `close()` must be called when done. */
+  interface LibcurlHTTPSession {
+    fetch(url: string, options?: LibcurlFetchOptions): Promise<LibcurlResponse>;
+    close(): void;
+  }
+
   interface Libcurl {
+    HTTPSession: new (options?: LibcurlHTTPSessionOptions) => LibcurlHTTPSession;
     ready: boolean;
     onload: (() => void) | null;
     set_websocket(url: string): void;

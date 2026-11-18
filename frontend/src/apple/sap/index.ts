@@ -12,6 +12,9 @@ export async function connectSAP() {
       path,
       headers: { 'Content-Type': 'application/x-apple-plist' },
       body: payload ? buildPlist({ 'sign-sap-setup-buffer': payload }) : undefined,
+      // Each sign-in sets up SAP afresh; a new connection means a retried
+      // sign-in does not stay on the same Apple server.
+      freshConnection: true,
     });
     if (response.status !== 200 || response.body.length > 2 * 1024 * 1024)
       throw new Error(`SAP setup failed (HTTP ${response.status})`);

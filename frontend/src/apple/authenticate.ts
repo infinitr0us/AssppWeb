@@ -27,11 +27,16 @@ export interface AuthRetry {
 }
 
 // Apple's auth endpoint answers some requests with a transient status (an
-// empty 204, 404, 429 or a 5xx). Like ipatool, replay the request up to three
-// times, 10s then 20s apart, honoring a Retry-After of up to 30s. `send`
-// rebuilds the request each time, so per-request headers are recomputed.
-const AUTH_REQUEST_ATTEMPTS = 3;
-const AUTH_RETRY_DELAY_MS = 10_000;
+// empty 204, 404, 429 or a 5xx). Since November 2026 this depends on which of
+// Apple's servers takes the request: the same sign-in fails several times and
+// then succeeds. Each attempt therefore goes over a new connection (see
+// `freshConnection`), and the request is replayed up to five times, 5s, 10s,
+// then 20s apart (ipatool waits 10s and 20s for three attempts), honoring a
+// Retry-After of up to 30s. `send` rebuilds the request each time, so
+// per-request headers are recomputed.
+const AUTH_REQUEST_ATTEMPTS = 5;
+const AUTH_RETRY_DELAY_MS = 5_000;
+const AUTH_RETRY_BACKOFF_CAP_MS = 20_000;
 const MAX_AUTH_RETRY_DELAY_MS = 30_000;
 
 function isTransientAuthStatus(status: number): boolean {
@@ -67,7 +72,7 @@ async function sendWithTransientRetry(
       );
     }
 
-    let delayMs = Math.min(AUTH_RETRY_DELAY_MS * 2 ** (statuses.length - 1), MAX_AUTH_RETRY_DELAY_MS);
+    let delayMs = Math.min(AUTH_RETRY_DELAY_MS * 2 ** (statuses.length - 1), AUTH_RETRY_BACKOFF_CAP_MS);
     const requested = retryAfterMs(response.headers['retry-after']);
     if (requested !== undefined) {
       if (requested > MAX_AUTH_RETRY_DELAY_MS) {
@@ -182,6 +187,7 @@ export class Authenticator {
                 headers,
                 body: plistBody,
                 cookies,
+                freshConnection: true,
               });
               cookies = extractAndMergeCookies(sent.rawHeaders, cookies);
               return sent;

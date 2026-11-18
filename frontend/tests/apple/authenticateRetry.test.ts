@@ -52,32 +52,60 @@ describe('apple/authenticate transient responses', () => {
     vi.useRealTimers();
   });
 
-  it('replays a 204 after 10s and reports the wait', async () => {
+  it('replays a 204 after 5s and reports the wait', async () => {
     vi.mocked(appleRequest).mockResolvedValueOnce(transientReply(204)).mockResolvedValueOnce(accountReply());
     const onRetry = vi.fn();
 
     const account = login(onRetry);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(5_000);
 
     await expect(account).resolves.toMatchObject({ passwordToken: 'token' });
     expect(appleRequest).toHaveBeenCalledTimes(2);
     expect(onRetry).toHaveBeenCalledWith({
       status: 204,
       attempt: 2,
-      attempts: 3,
-      delayMs: 10_000,
+      attempts: 5,
+      delayMs: 5_000,
     });
   });
 
-  it('gives up after three transient responses without stacking retries', async () => {
-    vi.mocked(appleRequest).mockResolvedValue(transientReply(204));
+  it('backs off 5s, 10s, then 20s and gives up after five transient responses', async () => {
+    vi.mocked(appleRequest).mockResolvedValue(transientReply(404));
+    const onRetry = vi.fn();
 
-    const account = login();
-    const assertion = expect(account).rejects.toThrow('204, 204, 204');
-    await vi.advanceTimersByTimeAsync(30_000);
+    const account = login(onRetry);
+    const assertion = expect(account).rejects.toThrow('404, 404, 404, 404, 404');
+    await vi.advanceTimersByTimeAsync(55_000);
 
     await assertion;
-    expect(appleRequest).toHaveBeenCalledTimes(3);
+    expect(appleRequest).toHaveBeenCalledTimes(5);
+    expect(onRetry.mock.calls.map(([retry]) => retry.delayMs)).toEqual([5_000, 10_000, 20_000, 20_000]);
+  });
+
+  it('succeeds when a later attempt reaches a server that answers', async () => {
+    vi.mocked(appleRequest)
+      .mockResolvedValueOnce(transientReply(503))
+      .mockResolvedValueOnce(transientReply(404))
+      .mockResolvedValueOnce(transientReply(204))
+      .mockResolvedValueOnce(accountReply());
+
+    const account = login();
+    await vi.advanceTimersByTimeAsync(35_000);
+
+    await expect(account).resolves.toMatchObject({ passwordToken: 'token' });
+    expect(appleRequest).toHaveBeenCalledTimes(4);
+  });
+
+  it('sends every sign-in attempt over a new connection', async () => {
+    vi.mocked(appleRequest).mockResolvedValueOnce(transientReply(204)).mockResolvedValueOnce(accountReply());
+
+    const account = login();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(account).resolves.toBeDefined();
+    for (const [request] of vi.mocked(appleRequest).mock.calls) {
+      expect(request).toMatchObject({ method: 'POST', freshConnection: true });
+    }
   });
 
   it('waits as long as Retry-After asks, within 30s', async () => {

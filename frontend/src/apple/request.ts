@@ -10,6 +10,13 @@ export interface AppleRequestOptions {
   headers?: Record<string, string>;
   body?: string;
   cookies?: Cookie[];
+  /**
+   * Send the request over a new connection instead of a kept-alive one from
+   * the shared pool. Since November 2026 Apple's sign-in servers answer the
+   * same request inconsistently, and a reused connection would send every
+   * retry to the same server.
+   */
+  freshConnection?: boolean;
 }
 
 export interface AppleResponse {
@@ -36,26 +43,33 @@ export async function appleRequest(opts: AppleRequestOptions): Promise<AppleResp
     }
   }
 
-  const resp = await libcurl.fetch(url, {
-    method: opts.method,
-    headers,
-    body: opts.body,
-    redirect: 'manual',
-    _libcurl_http_version: 1.1,
-  });
+  // A private session has its own connection pool; it is closed once the body
+  // has been read, so its connection is never reused.
+  const session = opts.freshConnection ? new libcurl.HTTPSession() : undefined;
+  try {
+    const resp = await (session ?? libcurl).fetch(url, {
+      method: opts.method,
+      headers,
+      body: opts.body,
+      redirect: 'manual',
+      _libcurl_http_version: 1.1,
+    });
 
-  const responseHeaders: Record<string, string> = {};
-  for (const [key, value] of resp.raw_headers) {
-    responseHeaders[key.toLowerCase()] = value;
+    const responseHeaders: Record<string, string> = {};
+    for (const [key, value] of resp.raw_headers) {
+      responseHeaders[key.toLowerCase()] = value;
+    }
+
+    const body = await resp.text();
+
+    return {
+      status: resp.status,
+      statusText: resp.statusText,
+      headers: responseHeaders,
+      rawHeaders: resp.raw_headers,
+      body,
+    };
+  } finally {
+    session?.close();
   }
-
-  const body = await resp.text();
-
-  return {
-    status: resp.status,
-    statusText: resp.statusText,
-    headers: responseHeaders,
-    rawHeaders: resp.raw_headers,
-    body,
-  };
 }
