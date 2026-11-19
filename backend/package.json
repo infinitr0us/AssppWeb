@@ -11,9 +11,9 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@mercuryworkshop/wisp-js": "^0.4.1",
-    "bplist-creator": "^0.1.1",
-    "bplist-parser": "^0.3.2",
+    "@mercuryworkshop/wisp-js": "^0.5.3",
+    "bplist-creator": "^0.3.0",
+    "bplist-parser": "^0.5.0",
     "express": "^4.21.2",
     "plist": "^3.1.0",
     "unbzip2-stream": "^1.4.3",
