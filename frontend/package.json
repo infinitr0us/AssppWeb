@@ -11,7 +11,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "i18next": "^23.10.0",
+    "i18next": "^27.2.6",
     "i18next-browser-languagedetector": "^7.2.0",
     "idb": "^8.0.1",
     "libcurl.js": "^0.7.4",
